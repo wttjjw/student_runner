@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Студент бежит на пару</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14121f; color: #fff; font-family: system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  canvas { width: min(100vw, 900px); max-height: 80vh; aspect-ratio: 16 / 9; background: #222; border-radius: 12px; touch-action: none; }
+  .hint { font-size: 14px; opacity: .75; text-align: center; padding: 0 12px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="800" height="450"></canvas>
+<div class="hint">Управление: ↑ / ↓ или W / S · на телефоне — свайп или тап вверх/вниз экрана · Пробел / клик — старт · C — сменить героя</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  const LANES = [195, 285, 375];
+  const PLAYER_X = 130;
+  const MAX_HP = 5;
+  const MAX_TIME = 60;
+
+  // Три «пробежки»: сколько проектов нужно собрать, стартовое время, скорость
+  const LEVELS = [
+    { need: 5, time: 35, speed: 260 },
+    { need: 7, time: 40, speed: 320 },
+    { need: 9, time: 45, speed: 390 },
+  ];
+
+  // hp — в сердечках (0.5 = полсердечка), time — в секундах, proj — проекты
+  const TYPES = [
+    { e: '📁', name: 'Учебный проект', hp: 0,    time: -3, proj: 1, w: 24 },
+    { e: '📚', name: 'Учёба',          hp: -1,   time: -3, proj: 0, w: 11 },
+    { e: '⏰', name: 'Дедлайн',        hp: -1,   time: -2, proj: 0, w: 10 },
+    { e: '🎵', name: 'TikTok',         hp: -0.5, time: -8, proj: 0, w: 9 },
+    { e: '📸', name: 'Reels',          hp: -0.5, time: -8, proj: 0, w: 9 },
+    { e: '☕', name: 'Кофе',           hp: 1,    time: 5,  proj: 0, w: 11 },
+    { e: '🍺', name: 'Пиво',           hp: 2,    time: -3, proj: 0, w: 6 },
+    { e: '🍏', name: 'Сидр',           hp: 2,    time: -3, proj: 0, w: 5 },
+    { e: '🍟', name: 'Картошка фри',   hp: 0.5,  time: -1, proj: 0, w: 8 },
+  ];
+  const TOTAL_W = TYPES.reduce((s, t) => s + t.w, 0);
+
+  const HEROES = ['🧑‍🎓', '👩‍🎓'];
+  let heroIdx = 0;
+
+  let state = 'menu'; // menu | play | levelwin | gameover | win
+  let levelIdx = 0;
+  let hp, time, projects, speed, lane, py, items, popups, spawnT, scroll, flash, totalScore, bob, message;
+
+  function startLevel(i) {
+    levelIdx = i;
+    const L = LEVELS[i];
+    hp = i === 0 ? 4 : Math.min(MAX_HP, hp + 1); // между пробежками чуть отдыхаем
+    time = L.time;
+    projects = 0;
+    speed = L.speed;
+    lane = 1;
+    py = LANES[1];
+    items = [];
+    popups = [];
+    spawnT = 0.8;
+    scroll = 0;
+    flash = null;
+    bob = 0;
+    state = 'play';
+  }
+
+  function newGame() {
+    totalScore = 0;
+    hp = 4;
+    startLevel(0);
+  }
+
+  function pickType() {
+    let r = Math.random() * TOTAL_W;
+    for (const t of TYPES) { if ((r -= t.w) <= 0) return t; }
+    return TYPES[0];
+  }
+
+  function spawn() {
+    const free = [0, 1, 2].sort(() => Math.random() - 0.5);
+    const count = Math.random() < 0.3 ? 2 : 1; // иногда два предмета сразу, но дорога не перекрыта
+    for (let i = 0; i < count; i++) {
+      items.push({ t: pickType(), x: W + 40, lane: free[i], taken: false });
+    }
+  }
+
+  function fmt(t) {
+    const parts = [];
+    if (t.proj) parts.push('📁 +1');
+    if (t.hp) parts.push((t.hp > 0 ? '❤️ +' : '💔 ') + t.hp);
+    if (t.time) parts.push((t.time > 0 ? '⏱ +' : '⏱ ') + t.time + 'с');
+    return parts.join('  ');
+  }
+
+  function collect(it) {
+    const t = it.t;
+    hp = Math.min(MAX_HP, hp + t.hp);
+    time = Math.min(MAX_TIME, time + t.time);
+    projects += t.proj;
+    if (t.proj) totalScore += 10;
+    popups.push({ x: PLAYER_X, y: py - 50, text: fmt(t), life: 1.2, good: t.hp > 0 || t.proj > 0 });
+    flash = { life: 0.18, color: t.hp < 0 || t.time <= -8 ? 'rgba(255,60,60,' : 'rgba(80,220,120,' };
+  }
+
+  function update(dt) {
+    if (state !== 'play') return;
+    const L = LEVELS[levelIdx];
+
+    time -= dt;
+    speed += dt * 4;
+    scroll += speed * dt;
+    bob += dt * 12;
+    py += (LANES[lane] - py) * Math.min(1, dt * 14);
+
+    spawnT -= dt;
+    if (spawnT <= 0) {
+      spawn();
+      spawnT = (0.55 + Math.random() * 0.45) * (260 / speed) * 1.1;
+    }
+
+    for (const it of items) {
+      it.x -= speed * dt;
+      if (!it.taken && it.lane === lane && Math.abs(it.x - PLAYER_X) < 38) {
+        it.taken = true;
+        collect(it);
+      }
+    }
+    items = items.filter(it => !it.taken && it.x > -60);
+
+    for (const p of popups) { p.life -= dt; p.y -= 30 * dt; }
+    popups = popups.filter(p => p.life > 0);
+    if (flash) { flash.life -= dt; if (flash.life <= 0) flash = null; }
+
+    if (hp <= 0) { hp = 0; message = 'Здоровье закончилось 💀'; state = 'gameover'; }
+    else if (time <= 0) { time = 0; message = 'Время вышло — опоздал на пару ⏰'; state = 'gameover'; }
+    else if (projects >= L.need) {
+      totalScore += Math.round(time) * 2;
+      state = levelIdx === LEVELS.length - 1 ? 'win' : 'levelwin';
+    }
+  }
+
+  // ---------- Рисование ----------
+  const buildings = Array.from({ length: 14 }, (_, i) => ({
+    x: i * 90, w: 60 + (i * 37) % 40, h: 80 + (i * 53) % 110, c: 40 + (i * 17) % 30,
+  }));
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, 170);
+    g.addColorStop(0, '#2b2a5c'); g.addColorStop(1, '#f2a65a');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, 170);
+
+    const total = buildings.length * 90;
+    for (const b of buildings) {
+      const x = ((b.x - scroll * 0.25) % total + total) % total - 100;
+      ctx.fillStyle = `rgb(${b.c},${b.c},${b.c + 25})`;
+      ctx.fillRect(x, 170 - b.h, b.w, b.h);
+      ctx.fillStyle = 'rgba(255,230,140,.55)';
+      for (let wy = 170 - b.h + 10; wy < 160; wy += 22)
+        for (let wx = x + 8; wx < x + b.w - 8; wx += 16) ctx.fillRect(wx, wy, 6, 9);
+    }
+
+    ctx.fillStyle = '#3a3a44'; ctx.fillRect(0, 150, W, H - 150);
+    ctx.fillStyle = '#55555f'; ctx.fillRect(0, 150, W, 8);
+
+    ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 3;
+    ctx.setLineDash([30, 24]);
+    ctx.lineDashOffset = scroll % 54;
+    for (const y of [240, 330]) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    ctx.setLineDash([]);
+  }
+
+  function emoji(e, x, y, size) {
+    ctx.font = `${size}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(e, x, y);
+  }
+
+  function drawHUD() {
+    // сердечки
+    for (let i = 0; i < MAX_HP; i++) {
+      const x = 20 + i * 34, y = 28;
+      const fill = Math.max(0, Math.min(1, hp - i));
+      emoji('🤍', x + 12, y, 26);
+      if (fill > 0) {
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x - 4, y - 16, 32 * fill, 32); ctx.clip();
+        emoji('❤️', x + 12, y, 26);
+        ctx.restore();
+      }
+    }
+    // время
+    const L = LEVELS[levelIdx];
+    const tw = 220, tx = W - tw - 20;
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(tx, 16, tw, 22);
+    const ratio = Math.max(0, Math.min(1, time / MAX_TIME));
+    ctx.fillStyle = time < 8 ? '#ff4d4d' : '#4dc3ff';
+    ctx.fillRect(tx, 16, tw * ratio, 22);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(`⏱ ${Math.ceil(time)} с`, tx + tw / 2, 28);
+
+    // проекты
+    ctx.textAlign = 'left'; ctx.font = 'bold 18px sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText(`📁 ${projects}/${L.need}`, 20, 66);
+    ctx.fillText(`Пробежка ${levelIdx + 1}/${LEVELS.length}`, 20, 90);
+    ctx.textAlign = 'right';
+    ctx.fillText(`Очки: ${totalScore}`, W - 20, 66);
+  }
+
+  function overlay(title, lines) {
+    ctx.fillStyle = 'rgba(10,8,25,.78)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.font = 'bold 38px sans-serif'; ctx.fillText(title, W / 2, 120);
+    ctx.font = '19px sans-serif';
+    lines.forEach((l, i) => ctx.fillText(l, W / 2, 175 + i * 30));
+  }
+
+  function draw() {
+    drawBackground();
+
+    if (state !== 'menu') {
+      for (const it of items) emoji(it.t.e, it.x, LANES[it.lane], 46);
+      emoji(HEROES[heroIdx], PLAYER_X, py + Math.sin(bob) * 3, 58);
+      for (const p of popups) {
+        ctx.globalAlpha = Math.min(1, p.life * 2);
+        ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center';
+        ctx.lineWidth = 4; ctx.strokeStyle = '#000'; ctx.strokeText(p.text, p.x + 40, p.y);
+        ctx.fillStyle = p.good ? '#9dffb0' : '#ff9d9d'; ctx.fillText(p.text, p.x + 40, p.y);
+        ctx.globalAlpha = 1;
+      }
+      if (flash) { ctx.fillStyle = flash.color + (flash.life * 2.2) + ')'; ctx.fillRect(0, 0, W, H); }
+      drawHUD();
+    }
+
+    if (state === 'menu') {
+      overlay('🎓 Студент бежит на пару', [
+        'Собирай 📁 проекты, пока не кончились ❤️ и ⏱ время.',
+        '☕ кофе — и сердце, и время · 🍺🍏 — много сердец, но время уходит',
+        '🎵📸 соцсети съедают время · 📚⏰ учёба и дедлайны бьют по здоровью',
+        '',
+        `Герой: ${HEROES[heroIdx]}  (C — сменить)`,
+        'Нажми пробел или тапни по экрану, чтобы начать',
+      ]);
+    } else if (state === 'levelwin') {
+      overlay('Пробежка пройдена! ✅', [
+        `Очки: ${totalScore}`,
+        'Дальше быстрее и сложнее.',
+        'Пробел / тап — следующая пробежка',
+      ]);
+    } else if (state === 'gameover') {
+      overlay('Проигрыш', [message, `Очки: ${totalScore}`, 'Пробел / тап — начать заново']);
+    } else if (state === 'win') {
+      overlay('Сессия сдана! 🎉', [`Итоговые очки: ${totalScore}`, 'Пробел / тап — сыграть ещё раз']);
+    }
+  }
+
+  // ---------- Ввод ----------
+  function move(d) { if (state === 'play') lane = Math.max(0, Math.min(2, lane + d)); }
+  function advance() {
+    if (state === 'menu' || state === 'gameover' || state === 'win') newGame();
+    else if (state === 'levelwin') startLevel(levelIdx + 1);
+  }
+
+  addEventListener('keydown', e => {
+    if (['ArrowUp', 'ArrowDown', ' '].includes(e.key)) e.preventDefault();
+    if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') move(-1);
+    else if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') move(1);
+    else if (e.key === ' ' || e.key === 'Enter') advance();
+    else if ((e.key === 'c' || e.key === 'C') && state === 'menu') heroIdx = (heroIdx + 1) % HEROES.length;
+  });
+
+  let touchY = null;
+  canvas.addEventListener('pointerdown', e => {
+    if (state !== 'play') { advance(); return; }
+    touchY = e.clientY;
+    const r = canvas.getBoundingClientRect();
+    move(e.clientY - r.top < r.height / 2 ? -1 : 1); // тап: верхняя/нижняя половина
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (touchY !== null && Math.abs(e.clientY - touchY) > 40) { // свайп
+      move(e.clientY < touchY ? -1 : 1);
+      touchY = e.clientY;
+    }
+  });
+  addEventListener('pointerup', () => { touchY = null; });
+
+  // ---------- Цикл ----------
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
